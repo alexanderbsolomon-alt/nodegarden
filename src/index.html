@@ -10586,15 +10586,18 @@ const Controls = (() => {
         };
         picker.addEventListener('input', (e) => queue(e.target.value));
         picker.addEventListener('change', (e) => queue(e.target.value));
-        // Clicking the swatch while not in custom-mode should also select
-        // custom — even if the user doesn't re-pick a color.
-        wrap.addEventListener('click', () => {
+        btns.push(wrap);
+        row.appendChild(wrap);
+        const dropper = ngMakeEyedropperButton((hex) => {
+          if (setSibling) setSibling(colorKey, hex);
+          picker.value = hex;
+          wrap.innerHTML = Renderer.fillSwatchSVG(3, hex);
+          wrap.appendChild(picker);
           btns.forEach(x => x && x.classList && x.classList.remove('on'));
           wrap.classList.add('on');
           onChange(3);
         });
-        btns.push(wrap);
-        row.appendChild(wrap);
+        row.appendChild(dropper);
       }
     }
     return {
@@ -10680,13 +10683,18 @@ const Controls = (() => {
         };
         picker.addEventListener('input', (e) => queue(e.target.value));
         picker.addEventListener('change', (e) => queue(e.target.value));
-        wrap.addEventListener('click', () => {
+        btns.push(wrap);
+        row.appendChild(wrap);
+        const dropper = ngMakeEyedropperButton((hex) => {
+          if (setSibling) setSibling(colorKey, hex);
+          picker.value = hex;
+          wrap.innerHTML = Renderer.strokeSwatchSVG(3, hex);
+          wrap.appendChild(picker);
           btns.forEach(x => x && x.classList && x.classList.remove('on'));
           wrap.classList.add('on');
           onChange(3);
         });
-        btns.push(wrap);
-        row.appendChild(wrap);
+        row.appendChild(dropper);
       }
     }
     return {
