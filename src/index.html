@@ -16657,6 +16657,7 @@ const App = (() => {
   function ensureLinkedMaskerTransforms(draggedNodeId) {
     const graph = state.graph;
     const attachments = graph.attachments || [];
+    console.log('[mask-link] ensure called', { draggedNodeId, attachmentCount: attachments.length, attachments: attachments.map(a => ({ m: a.maskerId, t: a.targetId })) });
     if (attachments.length === 0) return;
     const maskerSet = new Set();
     {
@@ -16693,8 +16694,11 @@ const App = (() => {
         }
       }
     }
+    console.log('[mask-link] connected set', { connected: Array.from(connected), maskerSet: Array.from(maskerSet) });
     for (const att of attachments) {
-      if (!connected.has(att.targetId)) continue;
+      const targetInConnected = connected.has(att.targetId);
+      console.log('[mask-link] attachment', { masker: att.maskerId, target: att.targetId, targetInConnected });
+      if (!targetInConnected) continue;
       const masker = graph.nodes[att.maskerId];
       if (!masker || masker.type !== 'transformInto') continue;
       let curId = att.maskerId;
@@ -16718,8 +16722,10 @@ const App = (() => {
         chainTail = upstreamId;
         curId = upstreamId;
       }
+      console.log('[mask-link] walk result', { masker: att.maskerId, hasTransform, chainTail });
       if (!hasTransform && chainTail) {
-        api.ensureDownstreamTransform(chainTail);
+        const newId = api.ensureDownstreamTransform(chainTail);
+        console.log('[mask-link] created transform', { chainTail, newId });
       }
     }
   }
