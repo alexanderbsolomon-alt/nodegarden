@@ -20125,7 +20125,14 @@ const App = (() => {
                 grabSourceId = shapeId;
               }
             } else {
-              grabSourceId = shapeId;
+              // Generative / structural terminals (repeat, scatter, sort,
+              // recolor, etc.). Use the terminal itself as the grab source
+              // so ensureDownstreamTransform splices a fresh transform
+              // immediately AFTER it — the user gets a draggable handle
+              // for the rendered result rather than mutating an upstream
+              // shape (which fails entirely when the chain has no shape
+              // upstream, e.g. line→repeat).
+              grabSourceId = tid;
             }
             break;
           }
