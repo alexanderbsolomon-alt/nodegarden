@@ -977,6 +977,21 @@ const Geometry = (() => {
     return out;
   }
 
+  // Smoothstep falloff over a wired-shape distance field. Returns a
+  // unit-range influence value: 1 at the shape's perimeter (d=0),
+  // smoothly tapering to 0 at distance >= range. Same falloff curve
+  // used by noise/scatter/displace for their shape-mode masking, so
+  // visual response is consistent across nodes. Caller multiplies the
+  // returned value into whatever quantity the node controls
+  // (amplitude, scale lerp, displacement strength).
+  function shapeFalloff(x, y, distField, range) {
+    if (!distField || !(range > 0)) return 0;
+    const d = distField(x, y);
+    if (d >= range) return 0;
+    const t = 1 - d / range;
+    return t * t * (3 - 2 * t);
+  }
+
   // Rasterize-then-vectorize union. Stamps every input ring into a
   // shared binary mask via a 2D canvas, traces the boundary with
   // marching squares, and returns clean fused outlines. Robust
@@ -2820,7 +2835,7 @@ const Geometry = (() => {
     chaikinSmooth,
     expandStroke, simplifyPath, simplifyIndices,
     delaunayTriangulate, voronoiCells, clipPolygonToRect,
-    buildShapeDistanceField, pointSegmentDistance
+    buildShapeDistanceField, pointSegmentDistance, shapeFalloff
   };
 })();
 
@@ -5604,10 +5619,20 @@ Engine.registerNodeType('transform', {
     const cy0 = (b.minY + b.maxY) / 2;
     const bboxW = Math.max(0.001, b.maxX - b.minX);
     const bboxH = Math.max(0.001, b.maxY - b.minY);
-    // Dimensional mode: scaleX is the desired output bbox width in
-    // pixels. Convert to a multiplier by dividing by input bbox width.
-    // Non-dimensional (legacy): scaleX is already a multiplier.
-    if (p._dimensional) {
+    // Pristine transform: ignore scaleX/scaleY entirely and force
+    // identity (multiplier 1). The slider's displayed value is the
+    // bbox-at-connect-time, which goes stale when upstream geometry
+    // changes — applying it then would resize the input. Skipping it
+    // until the user makes a deliberate edit (which clears _pristine)
+    // guarantees a fresh transform never modifies size, regardless of
+    // chain depth or upstream changes.
+    if (p._pristine) {
+      sx = 1;
+      sy = 1;
+    } else if (p._dimensional) {
+      // Dimensional mode: scaleX is the desired output bbox width in
+      // pixels. Convert to a multiplier by dividing by input bbox width.
+      // Non-dimensional (legacy): scaleX is already a multiplier.
       sx = sx / bboxW;
       sy = sy / bboxH;
     }
@@ -6861,6 +6886,29 @@ Engine.registerNodeType('centroidize', {
   }
 });
 
+Engine.registerNodeType('pointDensity', {
+  title: 'point density',
+  // Subdivide polygon and polyline edges so no segment exceeds
+  // 50/density pixels. Standalone version of the densification
+  // pass that noise/deform/displace used to do internally — exposed
+  // as its own node so the user can densify ONCE upstream and feed
+  // the result into multiple downstream modifiers, rather than
+  // paying the cost on every node and tweaking the slider in
+  // multiple places. Density 0 = passthrough (handy for temporarily
+  // bypassing without unwiring).
+  inputs: { in: { label: 'in' } },
+  params: {
+    density: { type: 'number', default: 25, min: 1, max: 50, step: 1, label: 'density' }
+  },
+  compute(inputs, p) {
+    const src = inputs.in;
+    if (!src || !src.points) return Geometry.empty();
+    const d = (typeof p.density === 'number') ? p.density : 25;
+    if (d <= 0) return src;
+    return Geometry.densifyEdges(src, 50 / d);
+  }
+});
+
 Engine.registerNodeType('noise', {
   title: 'noise',
   // Position perturbation via 2D smooth (value) noise sampled at
@@ -6917,15 +6965,11 @@ Engine.registerNodeType('noise', {
     shapeDistance: { type: 'number', default: 150, min: 10, max: 500, step: 1,
                      showIf: (p) => p.mode === 'shape',
                      label: 'range',
-                     paramPort: true, portName: 'shape', portKind: 'mask' },
-    // Densify the input before noising. Without densification, a
-    // 4-vertex rectangle just gets its 4 corners noised — yields
-    // tilted lines instead of a roughened edge. Higher = denser
-    // sampling along each polygon edge. 0 = no densification.
-    // Internally this becomes maxEdgeLen ≈ 50/density px, so
-    // density=10 produces ~5px segments, density=50 ~1px.
-    density:       { type: 'number', default: 0, min: 0, max: 50, step: 1,
-                     label: 'density' }
+                     paramPort: true, portName: 'shape', portKind: 'mask' }
+    // The `density` slider was removed in favor of a standalone
+    // pointDensity node (place it upstream of noise to subdivide
+    // input edges). Old saves with density>0 still work — compute
+    // below honors any density value preserved on the node.
   },
   compute(inputs, p) {
     let src = inputs.in;
@@ -7009,13 +7053,7 @@ Engine.registerNodeType('noise', {
         // produces a visible boundary in the output.
         amp = strength * t * t * (3 - 2 * t);
       } else if (useShape && shapeDistField) {
-        const d = shapeDistField(pt.x, pt.y);
-        if (d >= sr) {
-          amp = 0;
-        } else {
-          const t = 1 - d / sr;
-          amp = strength * t * t * (3 - 2 * t);
-        }
+        amp = strength * Geometry.shapeFalloff(pt.x, pt.y, shapeDistField, sr);
       }
       pt.x += nx * amp;
       pt.y += ny * amp;
@@ -7092,12 +7130,11 @@ Engine.registerNodeType('deform', {
     warpPhase:     { type: 'number', default: 90, min: 0,    max: 360, step: 5,
                      showIf: (p) => p.mode === 'warp', label: 'phase' },
     warpAxis:      { type: 'modeButton', default: 'horizontal', modes: ['horizontal', 'vertical'],
-                     showIf: (p) => p.mode === 'warp', label: 'axis' },
-    // Densify input edges before deforming. Bend especially needs
-    // dense sampling to look smooth — a 4-vertex rectangle bent
-    // 180° just turns into a tilted parallelogram. Higher = denser.
-    // 0 = off. maxEdgeLen ≈ 50/density px.
-    density: { type: 'number', default: 0, min: 0, max: 50, step: 1, label: 'density' }
+                     showIf: (p) => p.mode === 'warp', label: 'axis' }
+    // The `density` slider was removed in favor of a standalone
+    // pointDensity node (place it upstream of deform). Old saves
+    // with density>0 still work — compute below honors any density
+    // value preserved on the node.
   },
   compute(inputs, p) {
     let src = inputs.in;
@@ -7219,12 +7256,11 @@ Engine.registerNodeType('displace', {
     strength: { type: 'number', default: 0, min: -200, max: 200, step: 1, label: 'strength' },
     scaleShapeDistance: { type: 'number', default: 100, min: 10, max: 500, step: 1,
                           label: 'range',
-                          paramPort: true, portName: 'scaleShape', portKind: 'mask' },
-    // Densify input edges before displacing. With a coarse input,
-    // the per-vertex push leaves long straight segments between
-    // displaced corners — densifying gives the bulge/dent a
-    // smooth curve. Higher = denser. 0 = off.
-    density: { type: 'number', default: 0, min: 0, max: 50, step: 1, label: 'density' }
+                          paramPort: true, portName: 'scaleShape', portKind: 'mask' }
+    // The `density` slider was removed in favor of a standalone
+    // pointDensity node (place it upstream of displace). Old saves
+    // with density>0 still work — compute below honors any density
+    // value preserved on the node.
   },
   compute(inputs, p) {
     let src = inputs.in;
@@ -7303,10 +7339,8 @@ Engine.registerNodeType('displace', {
     // ≈1 since this is a distance field.
     const eps = 0.5;
     for (const pt of out.points) {
-      const d = dist(pt.x, pt.y);
-      if (d >= range) continue;
-      const t = 1 - d / range;
-      const fall = t * t * (3 - 2 * t); // smoothstep
+      const fall = Geometry.shapeFalloff(pt.x, pt.y, dist, range);
+      if (fall <= 0) continue;
       const s = strength * fall;
       const gx = (dist(pt.x + eps, pt.y) - dist(pt.x - eps, pt.y)) / (2 * eps);
       const gy = (dist(pt.x, pt.y + eps) - dist(pt.x, pt.y - eps)) / (2 * eps);
@@ -9410,12 +9444,8 @@ Engine.registerNodeType('scatter', {
         // falloff (no hard ring) over the user's distance.
         const tr = (typeof p.scaleShapeDistance === 'number') ? p.scaleShapeDistance : 100;
         const ts = (typeof p.scaleTargetScale === 'number') ? p.scaleTargetScale : 2;
-        const d = scaleDistField(pt.x, pt.y);
-        if (d <= tr) {
-          const t = 1 - d / tr;
-          const strength = t * t * (3 - 2 * t);
-          scale = 1 + (ts - 1) * strength;
-        }
+        const strength = Geometry.shapeFalloff(pt.x, pt.y, scaleDistField, tr);
+        scale = 1 + (ts - 1) * strength;
       }
       // Orientation. Inward/outward compute a radial angle from the
       // centroid so the ticks splay like bicycle spokes — outward = tick
@@ -13763,11 +13793,21 @@ const App = (() => {
       const g = state.graph;
       const src = g.nodes[sourceNodeId];
       if (!src) return null;
+      // Walk the chain of transforms/copies to the tail. Without
+      // this, repeated drag-init calls would always pick the
+      // FIRST downstream transform and any user-added transform
+      // further along the chain (e.g. shape→T1→T2 from a previous
+      // drag-spawn) would be ignored — the drag would write to T1
+      // and skip T2's contribution, which is what made subsequent
+      // drags "feel awkward" once the user had built any chain.
+      const tailId = this.findLatestDownstreamTransform(sourceNodeId);
+      if (tailId) return tailId;
       // Outgoing wires from source's `out` port.
       const outgoing = g.wires.filter(w => w.from.nodeId === sourceNodeId);
       // Fast path: exactly one consumer, and it's a Transform on the `in`
       // port. Reuse it — the user already has a translate node in
-      // place, no need to splice another.
+      // place, no need to splice another. (Note: findLatestDownstreamTransform
+      // only follows transform/copy; this catches copyAll, which it skips.)
       if (outgoing.length === 1) {
         const only = outgoing[0];
         const consumer = g.nodes[only.to.nodeId];
@@ -15162,6 +15202,9 @@ const App = (() => {
     if (selected && selected.type === 'noise' && !selected.bypass) {
       renderNoiseTargetOverlay(overlayLayer, selected);
     }
+    if (selected && selected.type === 'pointDensity' && !selected.bypass) {
+      renderPointDensityOverlay(overlayLayer, selected);
+    }
     if (selected && selected.type === 'camera' && !selected.bypass) {
       renderCameraOverlay(overlayLayer, selected);
     }
@@ -16051,6 +16094,25 @@ const App = (() => {
     }
     const svg = emitTargetHandlesSVG(node.id, targets);
     if (svg) layer.insertAdjacentHTML('beforeend', svg);
+  }
+
+  // Visualize the densified vertex positions emitted by a pointDensity
+  // node when it's selected. Tiny tan dots at each output point so the
+  // user can SEE the density they've set — without this, the node looks
+  // identical to its input until something downstream perturbs the
+  // points.
+  function renderPointDensityOverlay(layer, node) {
+    const CX = 300, CY = 300;
+    const geom = state.results[node.id];
+    if (!geom || !geom.points || geom.points.length === 0) return;
+    const r = 1.6 / Math.max(0.0001, artView.zoom);
+    let svg = '';
+    for (const pt of geom.points) {
+      svg += '<circle cx="' + (CX + pt.x).toFixed(2) + '" cy="' + (CY + pt.y).toFixed(2) +
+             '" r="' + r.toFixed(2) + '" fill="#c9a86a"' +
+             ' style="pointer-events:none"/>';
+    }
+    layer.insertAdjacentHTML('beforeend', svg);
   }
 
   function renderPencilOverlay(layer, node) {
@@ -19207,6 +19269,7 @@ const App = (() => {
     { type: 'noise',         label: 'noise',        group: 3 },
     { type: 'deform',        label: 'deform',       group: 3 },
     { type: 'displace',      label: 'displace',     group: 3 },
+    { type: 'pointDensity',  label: 'point density',group: 3 },
     { type: 'fracture',      label: 'fracture',     group: 3 },
     // Group 4 — point clouds / iteration / sim / sort
     { type: 'scatter',       label: 'scatter',      group: 4 },
