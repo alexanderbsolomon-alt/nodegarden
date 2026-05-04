@@ -6888,24 +6888,46 @@ Engine.registerNodeType('centroidize', {
 
 Engine.registerNodeType('pointDensity', {
   title: 'point density',
-  // Subdivide polygon and polyline edges so no segment exceeds
-  // 50/density pixels. Standalone version of the densification
-  // pass that noise/deform/displace used to do internally — exposed
-  // as its own node so the user can densify ONCE upstream and feed
-  // the result into multiple downstream modifiers, rather than
-  // paying the cost on every node and tweaking the slider in
-  // multiple places. Density 0 = passthrough (handy for temporarily
-  // bypassing without unwiring).
+  // Geometric subdivision: density N targets ~2^N × the original
+  // point count. Each integer step doubles the point density, so 1
+  // ≈ 2×, 2 ≈ 4×, 5 ≈ 32×, 10 ≈ 1024×. The math sets maxEdgeLen to
+  // the average edge length divided by 2^N, then defers to
+  // densifyEdges. This gives the user a predictable "louder knob"
+  // feel — each click meaningfully changes density without a
+  // 50-step slider where 80% of values look identical.
+  // Density 0 = passthrough (off state).
   inputs: { in: { label: 'in' } },
   params: {
-    density: { type: 'number', default: 25, min: 1, max: 50, step: 1, label: 'density' }
+    density: { type: 'number', default: 1, min: 0, max: 10, step: 1, label: 'density' }
   },
   compute(inputs, p) {
     const src = inputs.in;
     if (!src || !src.points) return Geometry.empty();
-    const d = (typeof p.density === 'number') ? p.density : 25;
+    const d = (typeof p.density === 'number') ? p.density : 0;
     if (d <= 0) return src;
-    return Geometry.densifyEdges(src, 50 / d);
+    // Average edge length over polygon/polyline edges. Anchors the
+    // doubling to the input's own scale so a small shape and a large
+    // shape both get the same relative density change per slider tick.
+    const ptById = {};
+    for (const pt of src.points) ptById[pt.id] = pt;
+    let totalLen = 0, edgeCount = 0;
+    for (const prim of src.primitives) {
+      if (prim.type !== 'polygon' && prim.type !== 'polyline') continue;
+      const pids = prim.pointIds || [];
+      const closed = prim.type === 'polygon';
+      const lastIdx = closed ? pids.length : pids.length - 1;
+      for (let i = 0; i < lastIdx; i++) {
+        const a = ptById[pids[i]];
+        const b = ptById[pids[(i + 1) % pids.length]];
+        if (!a || !b) continue;
+        totalLen += Math.hypot(b.x - a.x, b.y - a.y);
+        edgeCount++;
+      }
+    }
+    if (edgeCount === 0) return src;
+    const avgEdge = totalLen / edgeCount;
+    const maxEdgeLen = avgEdge / Math.pow(2, d);
+    return Geometry.densifyEdges(src, maxEdgeLen);
   }
 });
 
