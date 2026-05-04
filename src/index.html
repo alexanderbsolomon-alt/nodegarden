@@ -18145,6 +18145,11 @@ const App = (() => {
             ed.draggedStartBounds
           );
         }
+        if (typeof window !== 'undefined' && !window.__maskOffsetLogged) {
+          console.log('[mask-offset] pointermove', { linkedAttachmentCount: (ed.linkedAttachments||[]).length, dx, dy, dragId: ed.transformId });
+          window.__maskOffsetLogged = true;
+          setTimeout(() => { window.__maskOffsetLogged = false; }, 1500);
+        }
         if (ed.linkedAttachments && ed.linkedAttachments.length > 0) {
           for (const link of ed.linkedAttachments) {
             const att = (state.graph.attachments || []).find(
@@ -18155,6 +18160,11 @@ const App = (() => {
                 x: link.startOffsetX + dx,
                 y: link.startOffsetY + dy
               };
+              if (!window.__maskOffsetWroteLogged) {
+                console.log('[mask-offset] wrote', { masker: att.maskerId, target: att.targetId, offset: att.maskOffset });
+                window.__maskOffsetWroteLogged = true;
+                setTimeout(() => { window.__maskOffsetWroteLogged = false; }, 1500);
+              }
             }
           }
         }
