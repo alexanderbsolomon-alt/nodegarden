@@ -18079,18 +18079,26 @@ const App = (() => {
             'wrote tx=', tNode.params.tx, 'ty=', tNode.params.ty
           );
         }
-        // Mask-link propagation via the matrix path. Pure translation
-        // happens to be equivalent to the simple "add dx/dy to linked
-        // tx/ty" approach we used before, but going through the same
-        // primitive used by rotate/scale gestures keeps behavior
-        // consistent if a future change adds rotation to this path.
+        // Mask-link propagation via direct tx/ty addition. Translation
+        // drags on shapes/lines should move every linked transform by
+        // the SAME canvas-unit delta as the dragged transform — that's
+        // the Photoshop "linked layer" intent. Going through the
+        // matrix-decomposition path (applyDeltaToLinkedTransforms)
+        // produced visible drift when the dragged and linked transforms
+        // had very different scale factors, because paramsToMatrix
+        // doesn't fully respect _pristine and the scale baked into
+        // M_l_start leaks into the decomposed result. For pure
+        // translation a direct write is exact and faster.
         if (ed.linkedTransforms && ed.linkedTransforms.length > 0) {
-          applyDeltaToLinkedTransforms(
-            ed.linkedTransforms,
-            ed.draggedStartParams,
-            tNode.params,
-            ed.draggedStartBounds
-          );
+          for (const link of ed.linkedTransforms) {
+            const ln = state.graph.nodes[link.id];
+            if (!ln) continue;
+            if (ln.type !== 'transform' && ln.type !== 'copy' && ln.type !== 'copyAll') continue;
+            const lStartTx = (typeof link.startParams.tx === 'number') ? link.startParams.tx : 0;
+            const lStartTy = (typeof link.startParams.ty === 'number') ? link.startParams.ty : 0;
+            ln.params.tx = lStartTx + dx;
+            ln.params.ty = lStartTy + dy;
+          }
         }
         recompute();
         rerenderArtBoard();
