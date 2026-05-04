@@ -17014,7 +17014,9 @@ const App = (() => {
     // when the user drags. This splices a pristine identity transform
     // upstream of the masker the first time a drag pulls on it.
     ensureLinkedMaskerTransforms(draggedTransformId);
-    const idSet = new Set(findLinkedMaskerTransforms(draggedTransformId));
+    const linkedIds = findLinkedMaskerTransforms(draggedTransformId);
+    console.log('[mask-link] findLinkedMaskerTransforms result', { draggedTransformId, linkedIds, connected4: state.graph.wires.filter(w=>w.from.nodeId===draggedTransformId||w.to.nodeId===draggedTransformId).map(w=>({from:w.from.nodeId+':'+w.from.port,to:w.to.nodeId+':'+w.to.port})) });
+    const idSet = new Set(linkedIds);
     if (state.selectedNodeIds && state.selectedNodeIds.size > 1 &&
         state.selectedNodeIds.has(draggedTransformId)) {
       for (const id of state.selectedNodeIds) {
@@ -17063,12 +17065,22 @@ const App = (() => {
     const M_before_inv = matrixInvert(M_before);
     if (!M_before_inv) return;
     const D = matrixMul(M_after, M_before_inv);
+    if (typeof window !== 'undefined' && !window.__maskLinkLogged) {
+      console.log('[mask-link] applyDelta first call', { count: linkedTransforms.length, linkIds: linkedTransforms.map(l=>l.id), draggedBeforeTxTy: [draggedBeforeParams.tx, draggedBeforeParams.ty], draggedAfterTxTy: [draggedAfterParams.tx, draggedAfterParams.ty] });
+      window.__maskLinkLogged = true;
+      setTimeout(() => { window.__maskLinkLogged = false; }, 1000);
+    }
     for (const link of linkedTransforms) {
       const ln = state.graph.nodes[link.id];
       if (!ln) continue;
       const M_l = paramsToMatrix(link.startParams, link.bounds);
       const M_l_new = matrixMul(D, M_l);
       const out = matrixToParams(M_l_new, link.bounds, link.startParams);
+      if (!window.__maskLinkWriteLogged) {
+        console.log('[mask-link] writing to link', { id: link.id, type: ln.type, before: { tx: ln.params.tx, ty: ln.params.ty, scaleX: ln.params.scaleX, scaleY: ln.params.scaleY, _pristine: ln.params._pristine }, out });
+        window.__maskLinkWriteLogged = true;
+        setTimeout(() => { window.__maskLinkWriteLogged = false; }, 1000);
+      }
       ln.params.tx = out.tx;
       ln.params.ty = out.ty;
       ln.params.rotate = out.rotate;
