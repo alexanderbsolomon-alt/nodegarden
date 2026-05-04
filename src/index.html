@@ -3464,7 +3464,19 @@ const Engine = (() => {
             if (!targetResult) continue;
             const maskerInput = results[id];
             if (!maskerInput || !maskerInput.points || maskerInput.points.length === 0) continue;
-            results[att.targetId] = applyMask(targetResult, maskerInput, node.params);
+            // Mask offset (Photoshop linked-layer behavior): each
+            // attachment carries an x/y offset that the user accumulates
+            // by dragging the masked target on canvas. Applied here as
+            // a translation of the masker geometry before the boolean
+            // op, so the mask shape effectively tracks the target's
+            // position without any wire-graph plumbing — the offset
+            // lives on the attachment, not on a transform node.
+            const ox = (att.maskOffset && typeof att.maskOffset.x === 'number') ? att.maskOffset.x : 0;
+            const oy = (att.maskOffset && typeof att.maskOffset.y === 'number') ? att.maskOffset.y : 0;
+            const effectiveMasker = (ox === 0 && oy === 0)
+              ? maskerInput
+              : Geometry.transformPoints(maskerInput, ({ x, y }) => ({ x: x + ox, y: y + oy }));
+            results[att.targetId] = applyMask(targetResult, effectiveMasker, node.params);
             // Make the masker's OWN output the masked target so wire-
             // downstream consumers see the masked artwork, not the
             // raw mask shape. Only update if the attachment had a
@@ -16646,6 +16658,47 @@ const App = (() => {
     return Array.from(linked);
   }
 
+  // Snapshot which mask attachments should track this drag. Any
+  // attachment whose target is reachable (via wires, both directions)
+  // from the dragged transform gets its current maskOffset captured;
+  // pointermove then accumulates the drag delta on top. Result entries
+  // remain stable across the gesture — we mutate the live attachment's
+  // maskOffset, not these snapshots.
+  function captureLinkedAttachmentOffsets(draggedTransformId) {
+    const graph = state.graph;
+    const attachments = graph.attachments || [];
+    if (attachments.length === 0) return [];
+    const connected = new Set();
+    {
+      const stack = [draggedTransformId];
+      const seen = new Set();
+      while (stack.length) {
+        const cur = stack.pop();
+        if (seen.has(cur)) continue;
+        seen.add(cur);
+        connected.add(cur);
+        for (const w of graph.wires) {
+          if (w.from.nodeId === cur) stack.push(w.to.nodeId);
+          if (w.to.nodeId === cur) stack.push(w.from.nodeId);
+        }
+      }
+    }
+    const result = [];
+    for (const att of attachments) {
+      if (!connected.has(att.targetId)) continue;
+      const masker = graph.nodes[att.maskerId];
+      if (!masker || masker.type !== 'transformInto') continue;
+      if (!att.maskOffset) att.maskOffset = { x: 0, y: 0 };
+      result.push({
+        maskerId: att.maskerId,
+        targetId: att.targetId,
+        startOffsetX: att.maskOffset.x,
+        startOffsetY: att.maskOffset.y
+      });
+    }
+    return result;
+  }
+
   // === Mask-link transform propagation (matrix-based) ===
   //
   // The Photoshop-style "mask is linked to its layer" behavior. When
@@ -18091,6 +18144,19 @@ const App = (() => {
             tNode.params,
             ed.draggedStartBounds
           );
+        }
+        if (ed.linkedAttachments && ed.linkedAttachments.length > 0) {
+          for (const link of ed.linkedAttachments) {
+            const att = (state.graph.attachments || []).find(
+              a => a.maskerId === link.maskerId && a.targetId === link.targetId
+            );
+            if (att) {
+              att.maskOffset = {
+                x: link.startOffsetX + dx,
+                y: link.startOffsetY + dy
+              };
+            }
+          }
         }
         recompute();
         rerenderArtBoard();
@@ -20250,7 +20316,8 @@ const App = (() => {
           draggedStartParams: { ...tNode.params },
           draggedStartBounds: getTransformInputBounds(transformId) ||
                               { cx0: 0, cy0: 0, bboxW: 1, bboxH: 1 },
-          linkedTransforms: captureLinkedTransformStarts(transformId)
+          linkedTransforms: captureLinkedTransformStarts(transformId),
+          linkedAttachments: captureLinkedAttachmentOffsets(transformId)
         };
         if (typeof window !== 'undefined' && window.__debugCopyAll && tNode.type === 'copyAll') {
           console.log('[grab-setup]', tNode.id, 'startTx=', state.shapeTranslateDrag.startTx,
