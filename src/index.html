@@ -16127,12 +16127,18 @@ const App = (() => {
     const CX = 300, CY = 300;
     const geom = state.results[node.id];
     if (!geom || !geom.points || geom.points.length === 0) return;
-    const r = 1.6 / Math.max(0.0001, artView.zoom);
+    // Match the shape/line anchor visual (white fill, black stroke)
+    // for cross-node consistency. Slightly smaller radius than those
+    // 7px squares because pointDensity can produce hundreds of points
+    // and full-size handles would carpet the canvas.
+    const Z = Math.max(0.0001, artView.zoom);
+    const r = 2.5 / Z;
+    const sw = 0.75 / Z;
     let svg = '';
     for (const pt of geom.points) {
       svg += '<circle cx="' + (CX + pt.x).toFixed(2) + '" cy="' + (CY + pt.y).toFixed(2) +
-             '" r="' + r.toFixed(2) + '" fill="#c9a86a"' +
-             ' style="pointer-events:none"/>';
+             '" r="' + r.toFixed(2) + '" fill="#fff" stroke="#000" stroke-width="' + sw.toFixed(3) +
+             '" style="pointer-events:none"/>';
     }
     layer.insertAdjacentHTML('beforeend', svg);
   }
