@@ -16646,90 +16646,6 @@ const App = (() => {
     return Array.from(linked);
   }
 
-  // Auto-create transforms on masker chains that lack one, so a
-  // mask source like a bare shape gets a draggable handle the first
-  // time the user moves its target. Mirrors the connected-set walk
-  // in findLinkedMaskerTransforms; the only difference is that on a
-  // missed lookup we splice a pristine transform downstream of the
-  // chain's tail node instead of returning empty. Subsequent calls
-  // to findLinkedMaskerTransforms then succeed and the linked-write
-  // path picks up the new transform.
-  function ensureLinkedMaskerTransforms(draggedNodeId) {
-    const graph = state.graph;
-    const attachments = graph.attachments || [];
-    console.log('[mask-link] ensure called', { draggedNodeId, attachmentCount: attachments.length, attachments: attachments.map(a => ({ m: a.maskerId, t: a.targetId })) });
-    if (attachments.length === 0) return;
-    const maskerSet = new Set();
-    {
-      const stack = [];
-      for (const att of attachments) {
-        const m = graph.nodes[att.maskerId];
-        if (m && m.type === 'transformInto') stack.push(att.maskerId);
-      }
-      const seen = new Set();
-      while (stack.length) {
-        const cur = stack.pop();
-        if (seen.has(cur)) continue;
-        seen.add(cur);
-        maskerSet.add(cur);
-        for (const w of graph.wires) {
-          if (w.to.nodeId === cur) stack.push(w.from.nodeId);
-        }
-      }
-    }
-    if (maskerSet.has(draggedNodeId)) return;
-    const connected = new Set();
-    {
-      const stack = [draggedNodeId];
-      const seen = new Set();
-      while (stack.length) {
-        const cur = stack.pop();
-        if (seen.has(cur)) continue;
-        seen.add(cur);
-        if (maskerSet.has(cur)) continue;
-        connected.add(cur);
-        for (const w of graph.wires) {
-          if (w.from.nodeId === cur) stack.push(w.to.nodeId);
-          if (w.to.nodeId === cur) stack.push(w.from.nodeId);
-        }
-      }
-    }
-    console.log('[mask-link] connected set', { connected: Array.from(connected), maskerSet: Array.from(maskerSet) });
-    for (const att of attachments) {
-      const targetInConnected = connected.has(att.targetId);
-      console.log('[mask-link] attachment', { masker: att.maskerId, target: att.targetId, targetInConnected });
-      if (!targetInConnected) continue;
-      const masker = graph.nodes[att.maskerId];
-      if (!masker || masker.type !== 'transformInto') continue;
-      let curId = att.maskerId;
-      const upSeen = new Set([curId]);
-      let hasTransform = false;
-      let chainTail = null;
-      for (let hop = 0; hop < 40; hop++) {
-        const inWires = graph.wires.filter(
-          w => w.to.nodeId === curId && w.to.port === 'in'
-        );
-        if (inWires.length !== 1) break;
-        const upstreamId = inWires[0].from.nodeId;
-        if (upSeen.has(upstreamId)) break;
-        upSeen.add(upstreamId);
-        const upstream = graph.nodes[upstreamId];
-        if (!upstream) break;
-        if (upstream.type === 'transform' || upstream.type === 'copy' || upstream.type === 'copyAll') {
-          hasTransform = true;
-          break;
-        }
-        chainTail = upstreamId;
-        curId = upstreamId;
-      }
-      console.log('[mask-link] walk result', { masker: att.maskerId, hasTransform, chainTail });
-      if (!hasTransform && chainTail) {
-        const newId = api.ensureDownstreamTransform(chainTail);
-        console.log('[mask-link] created transform', { chainTail, newId });
-      }
-    }
-  }
-
   // === Mask-link transform propagation (matrix-based) ===
   //
   // The Photoshop-style "mask is linked to its layer" behavior. When
@@ -17008,15 +16924,7 @@ const App = (() => {
   //      Non-transform selections are ignored (they have no
   //      tx/ty/rotate/scaleX/scaleY to propagate to).
   function captureLinkedTransformStarts(draggedTransformId) {
-    // Make sure each masker chain that's about to be linked actually
-    // has a transform — otherwise findLinkedMaskerTransforms walks
-    // past the mask source, finds nothing, and the mask stays put
-    // when the user drags. This splices a pristine identity transform
-    // upstream of the masker the first time a drag pulls on it.
-    ensureLinkedMaskerTransforms(draggedTransformId);
-    const linkedIds = findLinkedMaskerTransforms(draggedTransformId);
-    console.log('[mask-link] findLinkedMaskerTransforms result', { draggedTransformId, linkedIds, connected4: state.graph.wires.filter(w=>w.from.nodeId===draggedTransformId||w.to.nodeId===draggedTransformId).map(w=>({from:w.from.nodeId+':'+w.from.port,to:w.to.nodeId+':'+w.to.port})) });
-    const idSet = new Set(linkedIds);
+    const idSet = new Set(findLinkedMaskerTransforms(draggedTransformId));
     if (state.selectedNodeIds && state.selectedNodeIds.size > 1 &&
         state.selectedNodeIds.has(draggedTransformId)) {
       for (const id of state.selectedNodeIds) {
@@ -17031,7 +16939,6 @@ const App = (() => {
         // place. By unioning each selected transform's mask-side
         // links, the mask follows whichever member of the group
         // the user happens to grab.
-        ensureLinkedMaskerTransforms(id);
         const linksForThis = findLinkedMaskerTransforms(id);
         for (const lid of linksForThis) idSet.add(lid);
       }
@@ -17065,36 +16972,17 @@ const App = (() => {
     const M_before_inv = matrixInvert(M_before);
     if (!M_before_inv) return;
     const D = matrixMul(M_after, M_before_inv);
-    if (typeof window !== 'undefined' && !window.__maskLinkLogged) {
-      console.log('[mask-link] applyDelta first call', { count: linkedTransforms.length, linkIds: linkedTransforms.map(l=>l.id), draggedBeforeTxTy: [draggedBeforeParams.tx, draggedBeforeParams.ty], draggedAfterTxTy: [draggedAfterParams.tx, draggedAfterParams.ty] });
-      window.__maskLinkLogged = true;
-      setTimeout(() => { window.__maskLinkLogged = false; }, 1000);
-    }
     for (const link of linkedTransforms) {
       const ln = state.graph.nodes[link.id];
       if (!ln) continue;
       const M_l = paramsToMatrix(link.startParams, link.bounds);
       const M_l_new = matrixMul(D, M_l);
       const out = matrixToParams(M_l_new, link.bounds, link.startParams);
-      if (!window.__maskLinkWriteLogged) {
-        console.log('[mask-link] writing to link', { id: link.id, type: ln.type, before: { tx: ln.params.tx, ty: ln.params.ty, scaleX: ln.params.scaleX, scaleY: ln.params.scaleY, _pristine: ln.params._pristine }, out });
-        window.__maskLinkWriteLogged = true;
-        setTimeout(() => { window.__maskLinkWriteLogged = false; }, 1000);
-      }
       ln.params.tx = out.tx;
       ln.params.ty = out.ty;
       ln.params.rotate = out.rotate;
-      // Preserve the auto-init scaleX/scaleY display values on a
-      // pristine linked transform — its compute already forces
-      // identity scale, and the matrix-decomposed scaleX/scaleY here
-      // would be 1 (because pristine matrices are identity), which
-      // would corrupt the bbox-based slider value the user sees and
-      // shrink the linked geometry the moment they later clear
-      // pristine via a deliberate scale edit.
-      if (!ln.params._pristine) {
-        ln.params.scaleX = out.scaleX;
-        ln.params.scaleY = out.scaleY;
-      }
+      ln.params.scaleX = out.scaleX;
+      ln.params.scaleY = out.scaleY;
     }
   }
 
