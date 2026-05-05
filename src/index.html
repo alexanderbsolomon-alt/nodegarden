@@ -20232,26 +20232,26 @@ const App = (() => {
         // — no shape upstream to find or downstream transform to
         // create. Otherwise fall back to the standard shape→transform
         // pairing logic.
-        let transformId = grabTransformId
-          || api.findLatestDownstreamTransform(grabSourceId)
-          || api.ensureDownstreamTransform(grabSourceId);
-        if (!transformId) return;
         // Mask attachment redirect (Photoshop linked-layer model):
-        // when the dragged transform is downstream of a masker's
-        // targetId, write the drag to the *target* transform instead.
-        // Combined with the existing linkedTransforms mechanism (which
-        // shifts the masker's `in` chain by the same delta), this
-        // makes target and mask source translate together — keeping
-        // the cutout aligned with the outline. Writing to the original
-        // dragged transform on top of these would double-translate the
-        // cutout (mask shift + downstream shift), which is the rate
-        // mismatch the user saw before.
-        const findRedirectTarget = (draggedId) => {
+        // when the dragged terminal sits in the connected wire-graph
+        // of a masker's targetId, write the drag to that *target*
+        // transform instead of the dragged terminal. The existing
+        // linkedTransforms mechanism shifts the masker's `in` chain
+        // by the same delta, so target and mask source translate
+        // together and the cutout stays aligned with the outline.
+        // Writing to the dragged terminal on top of these would
+        // double-translate the cutout (mask shift + downstream shift).
+        //
+        // Crucially, we check the redirect BEFORE calling
+        // ensureDownstreamTransform — otherwise we'd create an orphan
+        // transform on the click path that's never written to, just
+        // because we'll redirect away from it anyway.
+        const findRedirectTarget = (anchorId) => {
           const graph = state.graph;
           const attachments = graph.attachments || [];
-          if (attachments.length === 0) return null;
+          if (!anchorId || attachments.length === 0) return null;
           const connected = new Set();
-          const stack = [draggedId];
+          const stack = [anchorId];
           const seen = new Set();
           while (stack.length) {
             const cur = stack.pop();
@@ -20270,13 +20270,25 @@ const App = (() => {
             if (masker.params && masker.params.mode !== 'mask') continue;
             const target = graph.nodes[att.targetId];
             if (target && (target.type === 'transform' || target.type === 'copy' || target.type === 'copyAll')) {
-              if (att.targetId !== draggedId) return att.targetId;
+              if (att.targetId !== anchorId) return att.targetId;
             }
           }
           return null;
         };
-        const redirectTarget = findRedirectTarget(transformId);
-        if (redirectTarget) transformId = redirectTarget;
+        let transformId = grabTransformId
+          || api.findLatestDownstreamTransform(grabSourceId);
+        // Use whichever id we have so far as the walk anchor for the
+        // redirect check. This lets us short-circuit before
+        // ensureDownstreamTransform fires when the redirect would
+        // hand off to an existing target anyway.
+        const redirectAnchor = transformId || grabSourceId;
+        const redirectTarget = findRedirectTarget(redirectAnchor);
+        if (redirectTarget) {
+          transformId = redirectTarget;
+        } else if (!transformId) {
+          transformId = api.ensureDownstreamTransform(grabSourceId);
+        }
+        if (!transformId) return;
         const tNode = state.graph.nodes[transformId];
         const startPt = clientToCanvas(e.clientX, e.clientY);
         // Settle selection BEFORE capturing linked transforms so the
