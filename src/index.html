@@ -18090,20 +18090,6 @@ const App = (() => {
         // M_l_start leaks into the decomposed result. For pure
         // translation a direct write is exact and faster.
         if (ed.linkedTransforms && ed.linkedTransforms.length > 0) {
-          if (typeof window !== 'undefined' && !window.__linkLogged) {
-            console.log('[link-write]', {
-              dragId: ed.transformId,
-              dx: dx.toFixed(2), dy: dy.toFixed(2),
-              links: ed.linkedTransforms.map(l => ({
-                id: l.id, type: state.graph.nodes[l.id]?.type,
-                startTx: l.startParams.tx, startTy: l.startParams.ty,
-                currentTx: state.graph.nodes[l.id]?.params.tx,
-                currentTy: state.graph.nodes[l.id]?.params.ty
-              }))
-            });
-            window.__linkLogged = true;
-            setTimeout(() => { window.__linkLogged = false; }, 1500);
-          }
           for (const link of ed.linkedTransforms) {
             const ln = state.graph.nodes[link.id];
             if (!ln) continue;
@@ -18113,10 +18099,6 @@ const App = (() => {
             ln.params.tx = lStartTx + dx;
             ln.params.ty = lStartTy + dy;
           }
-        } else if (typeof window !== 'undefined' && !window.__noLinkLogged) {
-          console.log('[link-write] NO LINKED TRANSFORMS', { dragId: ed.transformId, attachments: state.graph.attachments });
-          window.__noLinkLogged = true;
-          setTimeout(() => { window.__noLinkLogged = false; }, 1500);
         }
         recompute();
         rerenderArtBoard();
@@ -20254,6 +20236,46 @@ const App = (() => {
           || api.findLatestDownstreamTransform(grabSourceId)
           || api.ensureDownstreamTransform(grabSourceId);
         if (!transformId) return;
+        // Mask attachment redirect: when the clicked terminal sits
+        // downstream of a `transformInto` in mask mode, this drag's
+        // intent is to move the *masked layer* — and that's the
+        // transform the masker is attached to (its targetId), not the
+        // downstream terminal. Translating the target propagates
+        // through TI's pass-through to every visible render of the
+        // masked output, AND the cutout follows because applyMask
+        // boolean-ops the post-translate target geometry against the
+        // (still-static) mask geometry. Net effect: drag the visible
+        // masked shape, both outline and cutout shift together.
+        const findMaskAttachmentTarget = (startId) => {
+          const attachments = state.graph.attachments || [];
+          if (attachments.length === 0) return null;
+          const seenWalk = new Set();
+          const stack = [startId];
+          while (stack.length) {
+            const cur = stack.pop();
+            if (seenWalk.has(cur)) continue;
+            seenWalk.add(cur);
+            const node = state.graph.nodes[cur];
+            if (!node) continue;
+            if (node.type === 'transformInto' && node.params && node.params.mode === 'mask') {
+              const att = attachments.find(a => a.maskerId === cur);
+              if (att) {
+                const target = state.graph.nodes[att.targetId];
+                if (target && (target.type === 'transform' || target.type === 'copy' || target.type === 'copyAll')) {
+                  return att.targetId;
+                }
+              }
+            }
+            for (const w of state.graph.wires) {
+              if (w.to.nodeId === cur) stack.push(w.from.nodeId);
+            }
+          }
+          return null;
+        };
+        const redirectTarget = findMaskAttachmentTarget(transformId);
+        if (redirectTarget && redirectTarget !== transformId) {
+          transformId = redirectTarget;
+        }
         const tNode = state.graph.nodes[transformId];
         const startPt = clientToCanvas(e.clientX, e.clientY);
         // Settle selection BEFORE capturing linked transforms so the
