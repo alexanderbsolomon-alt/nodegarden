@@ -18089,6 +18089,29 @@ const App = (() => {
         // doesn't fully respect _pristine and the scale baked into
         // M_l_start leaks into the decomposed result. For pure
         // translation a direct write is exact and faster.
+        if (typeof window !== 'undefined' && !window.__linkLogged) {
+          console.log('[link-write]', {
+            dragId: ed.transformId,
+            linkedCount: (ed.linkedTransforms || []).length,
+            links: (ed.linkedTransforms || []).map(l => ({
+              id: l.id,
+              type: state.graph.nodes[l.id]?.type,
+              startTx: l.startParams.tx, startTy: l.startParams.ty
+            })),
+            allMaskerInWires: state.graph.wires
+              .filter(w => {
+                const t = state.graph.nodes[w.to.nodeId];
+                return t && t.type === 'transformInto' && w.to.port === 'in';
+              })
+              .map(w => ({
+                fromNode: w.from.nodeId,
+                fromType: state.graph.nodes[w.from.nodeId]?.type,
+                toMasker: w.to.nodeId
+              }))
+          });
+          window.__linkLogged = true;
+          setTimeout(() => { window.__linkLogged = false; }, 2000);
+        }
         if (ed.linkedTransforms && ed.linkedTransforms.length > 0) {
           for (const link of ed.linkedTransforms) {
             const ln = state.graph.nodes[link.id];
@@ -20236,68 +20259,6 @@ const App = (() => {
           || api.findLatestDownstreamTransform(grabSourceId)
           || api.ensureDownstreamTransform(grabSourceId);
         if (!transformId) return;
-        // Mask attachment redirect: when the clicked terminal sits
-        // downstream of a `transformInto` in mask mode, this drag's
-        // intent is to move the *masked layer* — and that's the
-        // transform the masker is attached to (its targetId), not the
-        // downstream terminal. Translating the target propagates
-        // through TI's pass-through to every visible render of the
-        // masked output, AND the cutout follows because applyMask
-        // boolean-ops the post-translate target geometry against the
-        // (still-static) mask geometry. Net effect: drag the visible
-        // masked shape, both outline and cutout shift together.
-        const findMaskAttachmentTarget = (startId) => {
-          const attachments = state.graph.attachments || [];
-          if (attachments.length === 0) return null;
-          const seenWalk = new Set();
-          const stack = [startId];
-          while (stack.length) {
-            const cur = stack.pop();
-            if (seenWalk.has(cur)) continue;
-            seenWalk.add(cur);
-            const node = state.graph.nodes[cur];
-            if (!node) continue;
-            if (node.type === 'transformInto' && node.params && node.params.mode === 'mask') {
-              const att = attachments.find(a => a.maskerId === cur);
-              if (att) {
-                const target = state.graph.nodes[att.targetId];
-                if (target && (target.type === 'transform' || target.type === 'copy' || target.type === 'copyAll')) {
-                  return att.targetId;
-                }
-              }
-            }
-            for (const w of state.graph.wires) {
-              if (w.to.nodeId === cur) stack.push(w.from.nodeId);
-            }
-          }
-          return null;
-        };
-        const redirectTarget = findMaskAttachmentTarget(transformId);
-        // One-shot log so we can confirm whether redirect fires and
-        // what target type the walker found. If target is a shape,
-        // findMaskAttachmentTarget returns null and we never redirect
-        // — that's the silent failure mode that produces the rate
-        // mismatch the user reports.
-        if (typeof window !== 'undefined' && !window.__redirectLogged) {
-          const allMaskAtt = (state.graph.attachments||[]).filter(a => {
-            const m = state.graph.nodes[a.maskerId];
-            return m && m.type === 'transformInto' && m.params && m.params.mode === 'mask';
-          });
-          console.log('[redirect]', {
-            originalTransformId: transformId,
-            redirectFound: redirectTarget,
-            allMaskAttachments: allMaskAtt.map(a => ({
-              maskerId: a.maskerId,
-              targetId: a.targetId,
-              targetType: state.graph.nodes[a.targetId]?.type
-            }))
-          });
-          window.__redirectLogged = true;
-          setTimeout(() => { window.__redirectLogged = false; }, 2000);
-        }
-        if (redirectTarget && redirectTarget !== transformId) {
-          transformId = redirectTarget;
-        }
         const tNode = state.graph.nodes[transformId];
         const startPt = clientToCanvas(e.clientX, e.clientY);
         // Settle selection BEFORE capturing linked transforms so the
