@@ -18089,29 +18089,6 @@ const App = (() => {
         // doesn't fully respect _pristine and the scale baked into
         // M_l_start leaks into the decomposed result. For pure
         // translation a direct write is exact and faster.
-        if (typeof window !== 'undefined' && !window.__linkLogged) {
-          console.log('[link-write]', {
-            dragId: ed.transformId,
-            linkedCount: (ed.linkedTransforms || []).length,
-            links: (ed.linkedTransforms || []).map(l => ({
-              id: l.id,
-              type: state.graph.nodes[l.id]?.type,
-              startTx: l.startParams.tx, startTy: l.startParams.ty
-            })),
-            allMaskerInWires: state.graph.wires
-              .filter(w => {
-                const t = state.graph.nodes[w.to.nodeId];
-                return t && t.type === 'transformInto' && w.to.port === 'in';
-              })
-              .map(w => ({
-                fromNode: w.from.nodeId,
-                fromType: state.graph.nodes[w.from.nodeId]?.type,
-                toMasker: w.to.nodeId
-              }))
-          });
-          window.__linkLogged = true;
-          setTimeout(() => { window.__linkLogged = false; }, 2000);
-        }
         if (ed.linkedTransforms && ed.linkedTransforms.length > 0) {
           for (const link of ed.linkedTransforms) {
             const ln = state.graph.nodes[link.id];
@@ -20259,6 +20236,47 @@ const App = (() => {
           || api.findLatestDownstreamTransform(grabSourceId)
           || api.ensureDownstreamTransform(grabSourceId);
         if (!transformId) return;
+        // Mask attachment redirect (Photoshop linked-layer model):
+        // when the dragged transform is downstream of a masker's
+        // targetId, write the drag to the *target* transform instead.
+        // Combined with the existing linkedTransforms mechanism (which
+        // shifts the masker's `in` chain by the same delta), this
+        // makes target and mask source translate together — keeping
+        // the cutout aligned with the outline. Writing to the original
+        // dragged transform on top of these would double-translate the
+        // cutout (mask shift + downstream shift), which is the rate
+        // mismatch the user saw before.
+        const findRedirectTarget = (draggedId) => {
+          const graph = state.graph;
+          const attachments = graph.attachments || [];
+          if (attachments.length === 0) return null;
+          const connected = new Set();
+          const stack = [draggedId];
+          const seen = new Set();
+          while (stack.length) {
+            const cur = stack.pop();
+            if (seen.has(cur)) continue;
+            seen.add(cur);
+            connected.add(cur);
+            for (const w of graph.wires) {
+              if (w.from.nodeId === cur) stack.push(w.to.nodeId);
+              if (w.to.nodeId === cur) stack.push(w.from.nodeId);
+            }
+          }
+          for (const att of attachments) {
+            if (!connected.has(att.targetId)) continue;
+            const masker = graph.nodes[att.maskerId];
+            if (!masker || masker.type !== 'transformInto') continue;
+            if (masker.params && masker.params.mode !== 'mask') continue;
+            const target = graph.nodes[att.targetId];
+            if (target && (target.type === 'transform' || target.type === 'copy' || target.type === 'copyAll')) {
+              if (att.targetId !== draggedId) return att.targetId;
+            }
+          }
+          return null;
+        };
+        const redirectTarget = findRedirectTarget(transformId);
+        if (redirectTarget) transformId = redirectTarget;
         const tNode = state.graph.nodes[transformId];
         const startPt = clientToCanvas(e.clientX, e.clientY);
         // Settle selection BEFORE capturing linked transforms so the
