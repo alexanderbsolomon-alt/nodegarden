@@ -18090,6 +18090,20 @@ const App = (() => {
         // M_l_start leaks into the decomposed result. For pure
         // translation a direct write is exact and faster.
         if (ed.linkedTransforms && ed.linkedTransforms.length > 0) {
+          if (typeof window !== 'undefined' && !window.__linkLogged) {
+            console.log('[link-write]', {
+              dragId: ed.transformId,
+              dx: dx.toFixed(2), dy: dy.toFixed(2),
+              links: ed.linkedTransforms.map(l => ({
+                id: l.id, type: state.graph.nodes[l.id]?.type,
+                startTx: l.startParams.tx, startTy: l.startParams.ty,
+                currentTx: state.graph.nodes[l.id]?.params.tx,
+                currentTy: state.graph.nodes[l.id]?.params.ty
+              }))
+            });
+            window.__linkLogged = true;
+            setTimeout(() => { window.__linkLogged = false; }, 1500);
+          }
           for (const link of ed.linkedTransforms) {
             const ln = state.graph.nodes[link.id];
             if (!ln) continue;
@@ -18099,6 +18113,10 @@ const App = (() => {
             ln.params.tx = lStartTx + dx;
             ln.params.ty = lStartTy + dy;
           }
+        } else if (typeof window !== 'undefined' && !window.__noLinkLogged) {
+          console.log('[link-write] NO LINKED TRANSFORMS', { dragId: ed.transformId, attachments: state.graph.attachments });
+          window.__noLinkLogged = true;
+          setTimeout(() => { window.__noLinkLogged = false; }, 1500);
         }
         recompute();
         rerenderArtBoard();
