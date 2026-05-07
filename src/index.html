@@ -18709,11 +18709,38 @@ const App = (() => {
             // this is the mode-switch conversion (bezier → round).
             const anchor = s.points[edit.anchorIdx];
             const r = Math.hypot(srcCursor.x - anchor[0], srcCursor.y - anchor[1]);
-            // Group rounding: when multiStarts is set, apply the same r
-            // to every selected anchor (possibly across strokes) so they
-            // round in unison. The dragged anchor is the focal one whose
-            // distance to the cursor governs the size; the others follow.
-            // Mirrors shape's multi-select pullRadius behavior.
+            // Group rounding: when multiStarts is set, apply the radius
+            // to every selected anchor (possibly across strokes), CLAMPED
+            // per-anchor to what its own adjacent edges can support.
+            // Without per-anchor clamping, anchors with shorter edges
+            // would have their offset clamped to edgeLen/2 inside the
+            // compute — and when two consecutive corners both clamp
+            // to half their shared edge, the straight section between
+            // them collapses to zero and the anchor visually drops off
+            // the curve. The clamp formula mirrors the compute's own:
+            // offset = r / tan(halfCorner), so r_max for this anchor =
+            // (edgeLen/2) * tan(halfCorner).
+            const clampRForAnchor = (stk, idx, requestedR) => {
+              const pts = stk.points;
+              const len = pts.length;
+              const closed = !!stk.closed;
+              if (!closed && (idx === 0 || idx === len - 1)) return 0;
+              const prev = pts[(idx - 1 + len) % len];
+              const cur  = pts[idx];
+              const next = pts[(idx + 1) % len];
+              const inLen = Math.hypot(cur[0] - prev[0], cur[1] - prev[1]);
+              const outLen = Math.hypot(next[0] - cur[0], next[1] - cur[1]);
+              if (inLen < 0.001 || outLen < 0.001) return 0;
+              const inDirX = (cur[0] - prev[0]) / inLen, inDirY = (cur[1] - prev[1]) / inLen;
+              const outDirX = (next[0] - cur[0]) / outLen, outDirY = (next[1] - cur[1]) / outLen;
+              const cosAlpha = -inDirX * outDirX - inDirY * outDirY;
+              const cc = Math.max(-0.9999, Math.min(0.9999, cosAlpha));
+              const halfCorner = Math.acos(cc) / 2;
+              if (halfCorner <= 0.001) return 0;
+              const maxOffset = Math.min(inLen, outLen) * 0.5;
+              const maxR = maxOffset * Math.tan(halfCorner);
+              return Math.min(requestedR, maxR);
+            };
             if (Array.isArray(edit.multiStarts) && edit.multiStarts.length > 1) {
               const byStroke = {};
               edit.multiStarts.forEach(m => {
@@ -18728,7 +18755,7 @@ const App = (() => {
                 let handles = stk.handles ? stk.handles.slice() : null;
                 let handlesChanged = false;
                 byStroke[sIdxKey].forEach(m => {
-                  cornerRadius[m.anchorIdx] = r;
+                  cornerRadius[m.anchorIdx] = clampRForAnchor(stk, m.anchorIdx, r);
                   if (handles && handles[m.anchorIdx]) {
                     const hh = handles[m.anchorIdx];
                     if (hh[0] !== 0 || hh[1] !== 0 || hh[2] !== 0 || hh[3] !== 0) {
