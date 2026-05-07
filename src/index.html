@@ -708,11 +708,13 @@
   <div class="ng-divider" id="ng-divider"></div>
   <div class="ng-art-pane">
     <div class="ng-menubar">
-      <div class="ng-menu-title">&#9645; untitled.art</div>
+      <div class="ng-menu-title" id="ng-project-title">&#9645; untitled.eip</div>
+      <button class="ng-menu-btn" id="ng-open" title="open project (cmd/ctrl+o)">open</button>
+      <button class="ng-menu-btn" id="ng-save" title="save project (cmd/ctrl+s)">save</button>
       <div style="flex:1"></div>
       <div class="ng-zoom-readout" id="ng-art-zoom">100%</div>
       <button class="ng-menu-btn" id="ng-art-reset" title="reset zoom and pan">fit</button>
-      <button class="ng-menu-btn" id="ng-export" title="export as PNG">&#8595; export</button>
+      <button class="ng-menu-btn" id="ng-export" title="export PNG">&#8595; export</button>
     </div>
     <div class="ng-art-inner">
       <svg class="ng-canvas" id="ng-canvas" viewBox="0 0 600 600" preserveAspectRatio="xMidYMid meet">
@@ -12939,7 +12941,16 @@ const App = (() => {
     // moment of copy. Lives on `state` so the nodes' params are not
     // shared with the live graph — only the serialized JSON form is
     // retained, and paste deep-clones on the way out.
-    clipboard: null
+    clipboard: null,
+    // Project file state: the absolute path of the currently-loaded
+    // .eip file (null until first Save As / Open) and a dirty flag
+    // that flips true on every state-mutating save() and back to
+    // false on a successful file write or open. Drives the title bar
+    // ("untitled.eip *" → "myproject.eip") and is what Cmd+S vs
+    // Cmd+Shift+S branch on (Cmd+S re-saves to currentFilePath when
+    // present, otherwise prompts via the Save dialog).
+    currentFilePath: null,
+    isDirty: false
   };
 
   const graphView = { panX: 0, panY: 0, zoom: 1 };
@@ -21244,6 +21255,14 @@ const App = (() => {
     } else if (cmd && ((e.key === 'z' && e.shiftKey) || e.key === 'y')) {
       e.preventDefault();
       doRedo();
+    } else if (cmd && (e.key === 's' || e.key === 'S')) {
+      // Cmd/Ctrl+S = save (re-write current file, or prompt if none).
+      // Cmd/Ctrl+Shift+S = save as (always prompts).
+      e.preventDefault();
+      saveProject(e.shiftKey);
+    } else if (cmd && (e.key === 'o' || e.key === 'O')) {
+      e.preventDefault();
+      openProject();
     } else if (cmd && (e.key === 'c' || e.key === 'C')) {
       // Copy selected nodes to the in-memory clipboard. We copy the
       // selection set (or the single-selected node if no multi-select)
@@ -21760,6 +21779,8 @@ const App = (() => {
     rasterizeSvgToPng(svgDoc, vw, vh, 'eip-export.png');
   }
   document.getElementById('ng-export').addEventListener('click', exportCanvasPNG);
+  document.getElementById('ng-open').addEventListener('click', openProject);
+  document.getElementById('ng-save').addEventListener('click', () => saveProject(false));
 
   (function setupDivider() {
     const divider = document.getElementById('ng-divider');
@@ -21811,6 +21832,14 @@ const App = (() => {
       saveTimer = null;
       saveImmediate();
     }, SAVE_DEBOUNCE_MS);
+    // Any state mutation that triggers save() also makes the file
+    // representation diverge from disk. Mark dirty + refresh the
+    // title bar's `*` indicator. Cheap to call, no debounce — the
+    // title is just text.
+    if (!state.isDirty) {
+      state.isDirty = true;
+      updateProjectTitle();
+    }
   }
   // Flush any pending save before the tab unloads. Without this, a
   // user closing the page within the debounce window after their
@@ -21896,6 +21925,172 @@ const App = (() => {
     } catch (e) { return false; }
   }
 
+  // === Project file I/O (.eip) ============================================
+  // Native file save/load via Tauri's dialog + fs plugins, with a browser
+  // fallback (Blob download / file input) so the app still functions when
+  // run outside Tauri (raw HTML in a browser tab). Both paths converge on
+  // the same serialize/deserialize helpers, so the on-disk format is
+  // identical regardless of how the file was written.
+
+  const isTauri = typeof window !== 'undefined' && !!window.__TAURI__;
+
+  function updateProjectTitle() {
+    const el = document.getElementById('ng-project-title');
+    if (!el) return;
+    const name = state.currentFilePath
+      ? state.currentFilePath.split(/[/\\]/).pop()
+      : 'untitled.eip';
+    const dirty = state.isDirty ? ' *' : '';
+    el.textContent = '▭ ' + name + dirty;
+  }
+
+  function serializeProject() {
+    return JSON.stringify({
+      format: 'eip',
+      version: 1,
+      graph: {
+        nodes: state.graph.nodes,
+        wires: state.graph.wires,
+        nodeOrder: state.graph.nodeOrder,
+        attachments: state.graph.attachments || []
+      }
+    }, null, 2);
+  }
+
+  // Validate the file header before touching app state. Throws with a
+  // user-readable message that the open path turns into an alert. Older
+  // saves (pre-format-header) won't be openable through this path —
+  // localStorage migration logic in load() handles those.
+  function deserializeProject(text) {
+    let data;
+    try { data = JSON.parse(text); }
+    catch (e) { throw new Error('Not a valid .eip file (invalid JSON).'); }
+    if (data.format !== 'eip') {
+      throw new Error('Not a valid .eip file.');
+    }
+    if (!data.graph || !data.graph.nodes) {
+      throw new Error('Corrupt .eip file (missing graph data).');
+    }
+    return data.graph;
+  }
+
+  function replaceGraphFromOpen(graph) {
+    state.graph.nodes = graph.nodes || {};
+    state.graph.wires = graph.wires || [];
+    state.graph.nodeOrder = graph.nodeOrder || Object.keys(graph.nodes || {});
+    state.graph.attachments = graph.attachments || [];
+    // Clear UI selection — the IDs no longer point at meaningful nodes.
+    state.selectedNodeId = null;
+    state.selectedNodeIds = new Set();
+    state.expandedBubbleId = null;
+    recompute();
+    rerender();
+    rerenderArtBoard();
+    saveImmediate();
+  }
+
+  async function saveProject(forceSaveAs) {
+    const text = serializeProject();
+    if (isTauri) {
+      let path = state.currentFilePath;
+      if (!path || forceSaveAs) {
+        try {
+          path = await window.__TAURI__.core.invoke('plugin:dialog|save', {
+            options: {
+              defaultPath: path || 'untitled.eip',
+              filters: [{ name: 'EIP project', extensions: ['eip'] }]
+            }
+          });
+        } catch (e) { console.error('save dialog failed', e); return; }
+        if (!path) return;
+      }
+      try {
+        await window.__TAURI__.core.invoke('plugin:fs|write_text_file', { path, contents: text });
+        state.currentFilePath = path;
+        state.isDirty = false;
+        updateProjectTitle();
+      } catch (e) {
+        console.error('write failed', e);
+        alert('Save failed: ' + (e && e.message ? e.message : e));
+      }
+    } else {
+      // Browser fallback: trigger a download.
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = state.currentFilePath
+        ? state.currentFilePath.split(/[/\\]/).pop()
+        : 'untitled.eip';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      state.isDirty = false;
+      updateProjectTitle();
+    }
+  }
+
+  async function openProject() {
+    // Push a history snapshot first so a destructive Open is undoable.
+    History.push(History.snapshot(state.graph));
+    if (isTauri) {
+      let path;
+      try {
+        path = await window.__TAURI__.core.invoke('plugin:dialog|open', {
+          options: {
+            multiple: false,
+            filters: [{ name: 'EIP project', extensions: ['eip'] }]
+          }
+        });
+      } catch (e) { console.error('open dialog failed', e); return; }
+      if (!path) return;
+      let text;
+      try {
+        text = await window.__TAURI__.core.invoke('plugin:fs|read_text_file', { path });
+      } catch (e) {
+        console.error('read failed', e);
+        alert('Could not read file: ' + (e && e.message ? e.message : e));
+        return;
+      }
+      try {
+        const graph = deserializeProject(text);
+        replaceGraphFromOpen(graph);
+        state.currentFilePath = path;
+        state.isDirty = false;
+        updateProjectTitle();
+      } catch (e) {
+        alert(e.message || 'Failed to open file.');
+      }
+    } else {
+      // Browser fallback: file input.
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.eip,application/json';
+      input.style.display = 'none';
+      input.addEventListener('change', () => {
+        const file = input.files && input.files[0];
+        if (!file) { document.body.removeChild(input); return; }
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const graph = deserializeProject(reader.result);
+            replaceGraphFromOpen(graph);
+            state.currentFilePath = file.name;
+            state.isDirty = false;
+            updateProjectTitle();
+          } catch (e) {
+            alert(e.message || 'Failed to open file.');
+          }
+          document.body.removeChild(input);
+        };
+        reader.readAsText(file);
+      });
+      document.body.appendChild(input);
+      input.click();
+    }
+  }
+
   function buildDefaultGraph() {
     // Empty starting state. The persistent "press tab to make a
     // node" watermark teaches how to begin; an empty workspace is a
@@ -21905,6 +22100,9 @@ const App = (() => {
   if (!load()) {
     buildDefaultGraph();
   }
+  // Kick the project-file title display so the menu bar reads
+  // "▭ untitled.eip" until the user does Save As / Open.
+  updateProjectTitle();
   applyGraphTransform();
   applyArtTransform();
   recompute();
