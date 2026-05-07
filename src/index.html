@@ -804,6 +804,31 @@ function ngClearEyedropper() {
   document.body.classList.remove('ng-eyedropper-active');
 }
 
+// Capture-phase eyedropper guard: when the dropper is armed, this
+// listener fires BEFORE any element-level pointerdown handler (transform
+// gizmo's translate-target polygon, piece-marker rect, the canvas-level
+// drag-init in shapeTranslateDrag, etc.). Without it, those handlers
+// stopPropagation themselves and the bubbling-phase eyedropper check on
+// the canvas never runs — so clicking on a shape that happens to have a
+// gizmo bbox over it gets read as a translate-drag instead of a color
+// pick. Capture-phase + stopPropagation here makes the dropper truly
+// one-shot regardless of what overlay is on top.
+document.addEventListener('pointerdown', (e) => {
+  if (!ngEyedropper || e.button !== 0) return;
+  // Only short-circuit when the click lands on the canvas — in the graph
+  // pane the dropper button itself is a button click that should still
+  // toggle, not sample. The cursor changes to crosshair body-wide when
+  // the dropper is armed, so the user knows to click on the canvas.
+  const onCanvas = e.target && e.target.closest && e.target.closest('#ng-canvas');
+  if (!onCanvas) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const writer = ngEyedropper.writer;
+  const hex = ngSampleColorAtPoint(e.clientX, e.clientY);
+  ngClearEyedropper();
+  if (hex && writer) writer(hex);
+}, true);
+
 const NG_EYEDROPPER_SVG =
   '<svg width="12" height="12" viewBox="0 0 12 12">' +
   '<circle cx="6" cy="6" r="3.5" fill="none" stroke="#000" stroke-width="1"/>' +
@@ -18679,22 +18704,57 @@ const App = (() => {
             else                       handles[edit.anchorIdx] = [hx, hy, -hx, -hy];
             strokes[edit.strokeIdx] = Object.assign({}, s, { handles });
           } else if (edit.kind === 'pullRadius') {
-            // Corner radius = distance between cursor and the anchor. If the anchor had
-            // bezier handles, clear them — this is the mode-switch conversion (bezier → round).
+            // Corner radius = distance between cursor and the dragged
+            // anchor. If the anchor had bezier handles, clear them —
+            // this is the mode-switch conversion (bezier → round).
             const anchor = s.points[edit.anchorIdx];
             const r = Math.hypot(srcCursor.x - anchor[0], srcCursor.y - anchor[1]);
-            const cornerRadius = (s.cornerRadius || s.points.map(() => 0)).slice();
-            cornerRadius[edit.anchorIdx] = r;
-            const patch = { cornerRadius };
-            if (s.handles && s.handles[edit.anchorIdx]) {
-              const h = s.handles[edit.anchorIdx];
-              if (h[0] !== 0 || h[1] !== 0 || h[2] !== 0 || h[3] !== 0) {
-                const handles = s.handles.slice();
-                handles[edit.anchorIdx] = [0, 0, 0, 0];
-                patch.handles = handles;
+            // Group rounding: when multiStarts is set, apply the same r
+            // to every selected anchor (possibly across strokes) so they
+            // round in unison. The dragged anchor is the focal one whose
+            // distance to the cursor governs the size; the others follow.
+            // Mirrors shape's multi-select pullRadius behavior.
+            if (Array.isArray(edit.multiStarts) && edit.multiStarts.length > 1) {
+              const byStroke = {};
+              edit.multiStarts.forEach(m => {
+                if (!byStroke[m.strokeIdx]) byStroke[m.strokeIdx] = [];
+                byStroke[m.strokeIdx].push(m);
+              });
+              Object.keys(byStroke).forEach(sIdxKey => {
+                const si = +sIdxKey;
+                const stk = strokes[si];
+                if (!stk) return;
+                const cornerRadius = (stk.cornerRadius || stk.points.map(() => 0)).slice();
+                let handles = stk.handles ? stk.handles.slice() : null;
+                let handlesChanged = false;
+                byStroke[sIdxKey].forEach(m => {
+                  cornerRadius[m.anchorIdx] = r;
+                  if (handles && handles[m.anchorIdx]) {
+                    const hh = handles[m.anchorIdx];
+                    if (hh[0] !== 0 || hh[1] !== 0 || hh[2] !== 0 || hh[3] !== 0) {
+                      handles[m.anchorIdx] = [0, 0, 0, 0];
+                      handlesChanged = true;
+                    }
+                  }
+                });
+                const patch = { cornerRadius };
+                if (handlesChanged) patch.handles = handles;
+                strokes[si] = Object.assign({}, stk, patch);
+              });
+            } else {
+              const cornerRadius = (s.cornerRadius || s.points.map(() => 0)).slice();
+              cornerRadius[edit.anchorIdx] = r;
+              const patch = { cornerRadius };
+              if (s.handles && s.handles[edit.anchorIdx]) {
+                const h = s.handles[edit.anchorIdx];
+                if (h[0] !== 0 || h[1] !== 0 || h[2] !== 0 || h[3] !== 0) {
+                  const handles = s.handles.slice();
+                  handles[edit.anchorIdx] = [0, 0, 0, 0];
+                  patch.handles = handles;
+                }
               }
+              strokes[edit.strokeIdx] = Object.assign({}, s, patch);
             }
-            strokes[edit.strokeIdx] = Object.assign({}, s, patch);
           }
           node.params.strokes = strokes;
           // First recompute: updates the line's output geometry
@@ -20748,8 +20808,14 @@ const App = (() => {
             const pt = (st && st.points && st.points[a.anchorIdx]) ? st.points[a.anchorIdx].slice() : null;
             return { strokeIdx: a.strokeIdx, anchorIdx: a.anchorIdx, startAnchor: pt };
           }).filter(x => x.startAnchor);
+          // Round mode: pull the same radius for every selected anchor —
+          // "round these in unison." Other modes group-move them. Mirrors
+          // the shape node's multi-select dispatch so line/polyline behaves
+          // consistently. The pullRadius pointermove handler below applies
+          // r to every multiStarts.anchorIdx when the array is set.
+          const groupKind = (mode === 'round') ? 'pullRadius' : 'moveAnchor';
           state.anchorEdit = {
-            kind: 'moveAnchor',
+            kind: groupKind,
             nodeId: nId, strokeIdx: sIdx, anchorIdx: aIdx, nodeType: 'line',
             startMouse: [p.x - 300, p.y - 300],
             startAnchor: s.points[aIdx].slice(),
@@ -20757,7 +20823,9 @@ const App = (() => {
             startRadius: r,
             moved: false,
             multiStarts: multiStarts,
-            stable: captureAnchorStableState(node)
+            // Only moveAnchor shifts the bbox; pullRadius keeps anchor
+            // positions in place, so the pivot doesn't move.
+            stable: (groupKind === 'moveAnchor') ? captureAnchorStableState(node) : null
           };
           History.begin(state.graph);
           rerenderArtBoard();
