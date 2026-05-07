@@ -6913,6 +6913,22 @@ Engine.registerNodeType('centroidize', {
   }
 });
 
+Engine.registerNodeType('lock', {
+  title: 'lock',
+  // Pure passthrough that flags its upstream chain as
+  // canvas-unselectable. Geometry still renders normally — the user
+  // can see the locked content on canvas — but click+drag and
+  // shift-click skip over any hit whose chain contains a lock node
+  // upstream of the rendered terminal. Useful as a "Photoshop locked
+  // layer" mechanism: wire a shape (or any chain) into a lock node
+  // when you want to keep its position fixed while building other
+  // things on top of it.
+  inputs: { in: { label: 'in' } },
+  compute(inputs, _p) {
+    return inputs.in || Geometry.empty();
+  }
+});
+
 Engine.registerNodeType('pointDensity', {
   title: 'point density',
   // Geometric subdivision: density N targets ~2^N × the original
@@ -19414,6 +19430,7 @@ const App = (() => {
     { type: 'sort',          label: 'sort',         group: 4 },
     { type: 'disconnect',    label: 'disconnect',   group: 4 },
     { type: 'freeze',        label: 'freeze',       group: 4 },
+    { type: 'lock',          label: 'lock',         group: 4 },
     // Group 5 — time
     { type: 'time',          label: 'time',         group: 5 },
     // Group 6 — output
@@ -20116,6 +20133,33 @@ const App = (() => {
               const d2 = (px - localX) * (px - localX) + (py - localY) * (py - localY);
               if (d2 < STROKE_TOL_SQ) { hit = true; break; }
             }
+          }
+          // Lock-chain guard: if the hit terminal sits downstream of
+          // (or IS) a `lock` node, treat the click as if nothing was
+          // hit. Geometry still renders, but the user can't grab it
+          // for translate-drag or selection. Continue the for-loop so
+          // a click that happens to overlap an unlocked terminal
+          // beneath the locked one still resolves correctly.
+          if (hit) {
+            const lockedChain = (() => {
+              const seenLock = new Set([tid]);
+              let cur = tid;
+              for (let hop = 0; hop < 40; hop++) {
+                const n = state.graph.nodes[cur];
+                if (!n) return false;
+                if (n.type === 'lock') return true;
+                const inW = state.graph.wires.filter(
+                  w => w.to.nodeId === cur && w.to.port === 'in'
+                );
+                if (inW.length !== 1) return false;
+                const up = inW[0].from.nodeId;
+                if (seenLock.has(up)) return false;
+                seenLock.add(up);
+                cur = up;
+              }
+              return false;
+            })();
+            if (lockedChain) { hit = false; }
           }
           if (hit) {
             if (pieceTransformId) {
