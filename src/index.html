@@ -22058,18 +22058,20 @@ const App = (() => {
       if (!path) return;
       let text;
       try {
-        // Same IPC Request pattern as write — path/options go in
-        // headers, body is null on read. The plugin returns the file
-        // as raw bytes (ArrayBuffer or number[]), which we decode
-        // back into a string before parsing.
-        const arr = await window.__TAURI__.core.invoke('plugin:fs|read_text_file', null, {
-          headers: {
-            path: encodeURIComponent(path),
-            options: JSON.stringify({})
-          }
-        });
-        const bytes = arr instanceof ArrayBuffer ? new Uint8Array(arr) : Uint8Array.from(arr);
-        text = new TextDecoder().decode(bytes);
+        // Read uses standard invoke args (path/options as fields), NOT
+        // the IPC Request body pattern that write uses. Write_text_file
+        // is the asymmetric one because file contents can be large
+        // and the Request body avoids JSON-stringifying them.
+        const result = await window.__TAURI__.core.invoke('plugin:fs|read_text_file', { path });
+        if (typeof result === 'string') {
+          text = result;
+        } else if (result instanceof ArrayBuffer) {
+          text = new TextDecoder().decode(new Uint8Array(result));
+        } else if (Array.isArray(result)) {
+          text = new TextDecoder().decode(Uint8Array.from(result));
+        } else {
+          throw new Error('unexpected read_text_file return type');
+        }
       } catch (e) {
         console.error('read failed', e);
         alert('Could not read file: ' + (e && e.message ? e.message : e));
