@@ -22005,11 +22005,13 @@ const App = (() => {
         if (!path) return;
       }
       try {
-        // Tauri 2's fs plugin uses an IPC Request: file contents go as
-        // the body, path/options go as headers. The JS plugin package
-        // does this same dance internally — we replicate it here so
-        // the bundled HTML doesn't need to import the plugin module.
-        await window.__TAURI__.core.invoke('plugin:fs|write_text_file', text, {
+        // Tauri 2's fs plugin uses an IPC Request: file *bytes* go as
+        // the body (Uint8Array, not a string), path/options go as
+        // headers. The JS plugin package does TextEncoder.encode()
+        // internally — we replicate it here so the bundled HTML
+        // doesn't need to import the plugin module.
+        const bytes = new TextEncoder().encode(text);
+        await window.__TAURI__.core.invoke('plugin:fs|write_text_file', bytes, {
           headers: {
             path: encodeURIComponent(path),
             options: JSON.stringify({})
@@ -22056,14 +22058,18 @@ const App = (() => {
       if (!path) return;
       let text;
       try {
-        // Same IPC Request pattern as write — path goes in headers,
-        // body is null on read.
-        text = await window.__TAURI__.core.invoke('plugin:fs|read_text_file', null, {
+        // Same IPC Request pattern as write — path/options go in
+        // headers, body is null on read. The plugin returns the file
+        // as raw bytes (ArrayBuffer or number[]), which we decode
+        // back into a string before parsing.
+        const arr = await window.__TAURI__.core.invoke('plugin:fs|read_text_file', null, {
           headers: {
             path: encodeURIComponent(path),
             options: JSON.stringify({})
           }
         });
+        const bytes = arr instanceof ArrayBuffer ? new Uint8Array(arr) : Uint8Array.from(arr);
+        text = new TextDecoder().decode(bytes);
       } catch (e) {
         console.error('read failed', e);
         alert('Could not read file: ' + (e && e.message ? e.message : e));
