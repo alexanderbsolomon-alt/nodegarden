@@ -1,6 +1,6 @@
 # everything is points
 
-A node-based vector art tool. Wire shapes through transforms, scatters, masks, and modifiers — every operation works on points, every result is just more points.
+A node-based vector art tool. Wire shapes through transforms, scatters, masks, and modifiers.
 
 Mac and Windows. Free. MIT licensed. Project files use the `.eip` extension.
 
